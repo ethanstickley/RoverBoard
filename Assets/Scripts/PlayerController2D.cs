@@ -125,7 +125,7 @@ public class PlayerController2D : MonoBehaviour
     {
         IsAirborne = true;
         airTime = Mathf.Max(airTime, 0f) + Mathf.Max(0.05f, timeAdd);
-        trickMgr?.OnAirStart();
+        trickMgr?.OnAirStart(airTime);
         Debug.Log($"AIR: start (window={airTime:0.00}s)");
     }
 

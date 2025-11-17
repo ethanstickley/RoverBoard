@@ -21,7 +21,7 @@ public class CatAI2D : MonoBehaviour
     public float despawnAfterFleeSec = 1.5f;
     bool fleeing;
 
-    // ── NEW: facing + flip controls ─────────────────────────────────────────────
+    // ── facing + flip controls ─────────────────────────────────────────────
     public enum FlipAxis { X, Y }
 
     [Header("Facing / Flip")]
@@ -31,7 +31,7 @@ public class CatAI2D : MonoBehaviour
     public FlipAxis flipAxis = FlipAxis.Y;    // choose axis to flip on
     public float flipHzMin = 6f, flipHzMax = 12f, flipSpeedRef = 4f;
     float _flipTimer;
-    // ───────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────
 
     void Reset() { rb = GetComponent<Rigidbody2D>(); }
 
@@ -65,11 +65,31 @@ public class CatAI2D : MonoBehaviour
 
     void FixedUpdate()
     {
-        if (fleeing) return;
+        // 1) Apply wander motion when NOT fleeing
+        if (!fleeing)
+        {
+            rb.linearVelocity = _dir * wanderSpeed;
+        }
 
-        rb.linearVelocity = _dir * wanderSpeed;
+        // 2) Detect dog & enter flee (set flee velocity) — only when not already fleeing
+        if (!fleeing)
+        {
+            var dog = Object.FindFirstObjectByType<DogAI2D>();
+            if (dog)
+            {
+                float d = Vector2.Distance(dog.rb.position, rb.position);
+                if (d <= fleeFromDogDist)
+                {
+                    Vector2 flee = (rb.position - dog.rb.position).normalized;
+                    rb.linearVelocity = flee * fleeSpeed;
+                    fleeing = true;
+                    SetSprite(true);
+                    Invoke(nameof(Despawn), despawnAfterFleeSec);
+                }
+            }
+        }
 
-        // Face movement direction if enabled
+        // 3) Face movement direction in ALL cases (wander or flee), AFTER velocity is finalized
         if (faceMovementDirection)
         {
             Vector2 v = rb.linearVelocity;
@@ -77,20 +97,6 @@ public class CatAI2D : MonoBehaviour
             {
                 float ang = Mathf.Atan2(v.y, v.x) * Mathf.Rad2Deg;
                 rb.MoveRotation(ang);
-            }
-        }
-
-        var dog = FindObjectOfType<DogAI2D>();
-        if (dog)
-        {
-            float d = Vector2.Distance(dog.rb.position, rb.position);
-            if (d <= fleeFromDogDist)
-            {
-                Vector2 flee = (rb.position - dog.rb.position).normalized;
-                rb.linearVelocity = flee * fleeSpeed;
-                fleeing = true;
-                SetSprite(true);
-                Invoke(nameof(Despawn), despawnAfterFleeSec);
             }
         }
     }
