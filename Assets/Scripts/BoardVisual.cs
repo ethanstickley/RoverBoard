@@ -1,137 +1,230 @@
-using System.Collections;
+﻿using System.Collections;
 using UnityEngine;
 
-/// <summary>
-/// BoardVisual
-/// - Visual spin for FLIP tricks (complete N spins over duration).
-/// - Visual sustained tilt for GRAB tricks (enter/hold/exit).
-/// - Visual ollie tilt/roll + rider hop trigger passthrough (optional).
-/// This script is purely visual�no physics.
-/// </summary>
 [DisallowMultipleComponent]
 public class BoardVisual : MonoBehaviour
 {
-    [Header("Refs")]
+    public enum FlipStyle { RotateOnly, RotateAndSwapSprite }
+
+    [Header("References")]
+    [Tooltip("SpriteRenderer that shows the board.")]
     public SpriteRenderer boardSR;
 
-    [Header("Ollie Visual")]
-    public float ollieTiltDegrees = 18f;
-    public float ollieOscillations = 1.0f; // back-and-forth wobble count
-    public AnimationCurve ollieTiltCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
-    public float ollieOptionalRoll = 0f; // additive Z-roll across air time
+    [Header("Base Sprites")]
+    [Tooltip("Default board sprite when no trick is active.")]
+    public Sprite defaultBoardSprite;
 
-    [Header("Flip Visuals")]
-    [Tooltip("Axis to spin around for flips (Z for top-down 2D).")]
+    [Header("Ollie (rise only, no rotation)")]
+    [Tooltip("How high the board rises visually during an ollie (world units).")]
+    public float ollieRise = 0.25f;
+    [Tooltip("Shape of the rise/fall (0..1 time → 0..1 height).")]
+    public AnimationCurve ollieCurve = AnimationCurve.EaseInOut(0, 0, 1, 0);
+
+    [Header("Flip Tricks (per trick index 0..3)")]
+    [Tooltip("Flip behavior per trick (RotateOnly or RotateAndSwapSprite).")]
+    public FlipStyle[] flipStyles = new FlipStyle[4] { FlipStyle.RotateOnly, FlipStyle.RotateOnly, FlipStyle.RotateOnly, FlipStyle.RotateOnly };
+    [Tooltip("Optional alternate sprites for RotateAndSwapSprite flips.")]
+    public Sprite[] flipSprites = new Sprite[4];
+
+    [Tooltip("Axis to rotate around for flips (use Z for top-down 2D).")]
     public Vector3 flipAxis = new Vector3(0, 0, 1);
 
-    [Header("Grab Visuals")]
-    [Tooltip("How quickly we lerp into grab tilt (deg/s).")]
-    public float grabTiltInSpeed = 180f;
-    [Tooltip("How quickly we lerp out of grab tilt (deg/s).")]
-    public float grabTiltOutSpeed = 240f;
+    [Header("Grab Tricks (per trick index 0..3)")]
+    [Tooltip("Sprites to display while each grab is held.")]
+    public Sprite[] grabSprites = new Sprite[4];
 
+    [Header("Grind")]
+    [Tooltip("Optional sprite to display while grinding.")]
+    public Sprite grindSprite;
+
+    // ---- internals ----
+    Vector3 _baseLocalPos;
     Quaternion _baseLocalRot;
+    Sprite _cachedSprite;
+
     Coroutine _ollieCo;
     Coroutine _flipCo;
-    float _currentGrabTilt;      // current degrees
-    float _targetGrabTilt;       // target degrees while holding grab
+
+    bool _activeFlip;
+    int _activeFlipIndex = -1;
+    bool _activeGrab;
+    int _activeGrabIndex = -1;
+    bool _activeGrind;
 
     void Awake()
     {
         if (!boardSR) boardSR = GetComponent<SpriteRenderer>();
+        if (!boardSR) Debug.LogWarning("[BoardVisual] Missing SpriteRenderer reference.");
+        _baseLocalPos = transform.localPosition;
         _baseLocalRot = transform.localRotation;
+        if (boardSR) _cachedSprite = boardSR.sprite;
+        if (!defaultBoardSprite && boardSR) defaultBoardSprite = boardSR.sprite;
     }
 
-    void LateUpdate()
-    {
-        // Smooth the grab tilt each frame
-        if (Mathf.Abs(_targetGrabTilt - _currentGrabTilt) > 0.01f)
-        {
-            float speed = (_targetGrabTilt > _currentGrabTilt) ? grabTiltInSpeed : grabTiltOutSpeed;
-            float step = speed * Time.deltaTime * Mathf.Sign(_targetGrabTilt - _currentGrabTilt);
-            float next = _currentGrabTilt + step;
-
-            if (Mathf.Sign(_targetGrabTilt - next) != Mathf.Sign(_targetGrabTilt - _currentGrabTilt))
-                next = _targetGrabTilt;
-
-            _currentGrabTilt = next;
-
-            // Compose final rotation: base + grab tilt (around Z) + any ongoing flip rotation already set in coroutine
-            // Since flips also rotate Z, we combine by adding an extra local Z here:
-            var e = transform.localRotation.eulerAngles;
-            e.z = _baseLocalRot.eulerAngles.z + e.z; // maintain any active flip rotation in 'e.z'
-            transform.localRotation = Quaternion.Euler(0f, 0f, e.z + _currentGrabTilt);
-        }
-    }
-
-    // ---------------- OLLIE ----------------
+    // =======================
+    // Public API (Ollie)
+    // =======================
     public void PlayOllie(float airSeconds)
     {
+        if (airSeconds <= 0.03f) airSeconds = 0.3f;
         if (_ollieCo != null) StopCoroutine(_ollieCo);
-        _ollieCo = StartCoroutine(OllieRoutine(airSeconds));
+        // capture base each ollie to avoid snapping to an old position
+        _baseLocalPos = transform.localPosition;
+        _ollieCo = StartCoroutine(OllieRiseRoutine(airSeconds));
     }
 
-    IEnumerator OllieRoutine(float dur)
+    IEnumerator OllieRiseRoutine(float dur)
     {
         float t = 0f;
-        var startRot = _baseLocalRot;
         while (t < dur)
         {
             float n = Mathf.Clamp01(t / Mathf.Max(0.0001f, dur));
-            float shaped = ollieTiltCurve.Evaluate(n);
-            float osc = Mathf.Sin(n * Mathf.PI * 2f * ollieOscillations);
-            float tilt = (shaped * ollieTiltDegrees) * osc;
-            float roll = ollieOptionalRoll * n;
-
-            transform.localRotation = startRot * Quaternion.Euler(0f, 0f, tilt + roll + _currentGrabTilt);
+            float y = ollieCurve.Evaluate(n) * ollieRise;
+            transform.localPosition = _baseLocalPos + new Vector3(0f, y, 0f);
             t += Time.deltaTime;
             yield return null;
         }
-        transform.localRotation = _baseLocalRot * Quaternion.Euler(0f, 0f, _currentGrabTilt);
+        transform.localPosition = _baseLocalPos;
         _ollieCo = null;
     }
 
-    // ---------------- FLIP (spin N times over duration) ----------------
-    public void PlayFlip(float duration, int spins)
+    // =======================
+    // Public API (Flips)
+    // =======================
+    /// <summary>
+    /// Rotate the board to complete 'spins' full rotations in 'duration' seconds.
+    /// Call with the trick index (0..3) so the component can optionally swap sprites depending on the trick.
+    /// </summary>
+    public void PlayFlip(float duration, int spins, int trickIndex)
     {
+        _activeFlip = true;
+        _activeFlipIndex = Mathf.Clamp(trickIndex, 0, 3);
+
+        // sprite choice for flip (if configured)
+        UpdateSpriteVisual(priority: "flip_start");
+
         if (_flipCo != null) StopCoroutine(_flipCo);
-        _flipCo = StartCoroutine(FlipRoutine(duration, spins));
+        _flipCo = StartCoroutine(FlipRoutine(duration, Mathf.Max(1, spins)));
     }
 
     IEnumerator FlipRoutine(float dur, int spins)
     {
         float t = 0f;
-        float totalDeg = 360f * Mathf.Max(1, spins);
+        float totalDeg = 360f * spins;
+
+        // start from a neutral rotation (respect any grab/grind/static usage by composing at the end)
+        _baseLocalRot = Quaternion.identity;
+
         while (t < dur)
         {
             float n = Mathf.Clamp01(t / Mathf.Max(0.0001f, dur));
             float angle = totalDeg * n;
-            // Spin around flipAxis (Z for top-down) and add current grab tilt on Z
             Quaternion spin = Quaternion.AngleAxis(angle, flipAxis.normalized);
-            transform.localRotation = spin * Quaternion.Euler(0f, 0f, _currentGrabTilt);
+            transform.localRotation = _baseLocalRot * spin;
             t += Time.deltaTime;
             yield return null;
         }
-        // End aligned (no spin), keep grab tilt if any
-        transform.localRotation = _baseLocalRot * Quaternion.Euler(0f, 0f, _currentGrabTilt);
+
+        // End aligned (no spin)
+        transform.localRotation = Quaternion.identity;
         _flipCo = null;
+
+        // end of flip
+        _activeFlip = false;
+        _activeFlipIndex = -1;
+        UpdateSpriteVisual(priority: "flip_end");
     }
 
-    // ---------------- GRAB (sustained tilt) ----------------
+    // =======================
+    // Public API (Grabs)
+    // =======================
+    /// <summary>Enter a grab (no rotation). Supply the grab trick index 0..3.</summary>
+    public void BeginGrab(int grabIndex)
+    {
+        _activeGrab = true;
+        _activeGrabIndex = Mathf.Clamp(grabIndex, 0, 3);
+        UpdateSpriteVisual(priority: "grab_begin");
+    }
+
+    /// <summary>Exit a grab (restore previous sprite if appropriate).</summary>
+    public void EndGrab()
+    {
+        _activeGrab = false;
+        _activeGrabIndex = -1;
+        UpdateSpriteVisual(priority: "grab_end");
+    }
+
+    // =======================
+    // Public API (Grind)
+    // =======================
+    public void StartGrind()
+    {
+        _activeGrind = true;
+        UpdateSpriteVisual(priority: "grind_begin");
+    }
+
+    public void StopGrind()
+    {
+        _activeGrind = false;
+        UpdateSpriteVisual(priority: "grind_end");
+    }
+
+    // =======================
+    // Legacy back-compat (optional)
+    // If older code calls tilt-based grab methods, keep them compiling
+    // but route to non-rotational grab visuals.
+    // =======================
     public void BeginGrabTilt(float degrees)
     {
-        _targetGrabTilt = degrees;
+        // No rotation for grabs now; treat as a generic grab using index 0 if caller doesn't pass one.
+        BeginGrab(0);
     }
-
     public void EndGrabTilt()
     {
-        _targetGrabTilt = 0f;
+        EndGrab();
     }
-
     public void ResetGrabs()
     {
-        _targetGrabTilt = 0f;
-        _currentGrabTilt = 0f;
-        transform.localRotation = _baseLocalRot;
+        // End any grab and restore visuals.
+        _activeGrab = false; _activeGrabIndex = -1;
+        UpdateSpriteVisual(priority: "reset_grabs");
+    }
+
+    // =======================
+    // Internal sprite selection
+    // =======================
+    void UpdateSpriteVisual(string priority)
+    {
+        if (!boardSR) return;
+
+        // Choose which sprite should be visible based on current states.
+        // Priority: Flip (if set to swap) > Grab > Grind > Default
+
+        // 1) Flip
+        if (_activeFlip && _activeFlipIndex >= 0 && _activeFlipIndex < flipStyles.Length)
+        {
+            if (flipStyles[_activeFlipIndex] == FlipStyle.RotateAndSwapSprite)
+            {
+                var fs = (flipSprites != null && _activeFlipIndex < flipSprites.Length) ? flipSprites[_activeFlipIndex] : null;
+                if (fs) { boardSR.sprite = fs; return; }
+            }
+        }
+
+        // 2) Grab
+        if (_activeGrab && _activeGrabIndex >= 0 && grabSprites != null && _activeGrabIndex < grabSprites.Length)
+        {
+            var gs = grabSprites[_activeGrabIndex];
+            if (gs) { boardSR.sprite = gs; return; }
+        }
+
+        // 3) Grind
+        if (_activeGrind && grindSprite)
+        {
+            boardSR.sprite = grindSprite; return;
+        }
+
+        // 4) Default
+        if (defaultBoardSprite) boardSR.sprite = defaultBoardSprite;
+        else if (_cachedSprite) boardSR.sprite = _cachedSprite;
     }
 }
