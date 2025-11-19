@@ -1,50 +1,62 @@
+// TrickManager.cs — single canonical airtime entry: TriggerAirtime(float)
 using System;
 using UnityEngine;
 
 [DisallowMultipleComponent]
 public class TrickManager : MonoBehaviour
 {
-    [Header("References")]
-    public BoardVisual boardVisual;
-    public PlayerOllieAnimator2D riderVisual;
+    // ======= External integration points =======
+    /// <summary>Fired whenever airtime resolves (land or bail). (landed, reason)</summary>
+    public event Action<bool, string> AirFinished;
+    /// <summary>Fired on every bail (air or ground).</summary>
+    public event Action<string> Bail;
 
+    // ======= References =======
+    [Header("References")]
+    public BoardVisual boardVisual;            // optional but recommended
+    public PlayerOllieAnimator2D riderVisual;  // optional
+
+    // ======= Airtime =======
     [Header("Airtime")]
-    public float minAirtimeToTrick = 0.15f;
+    [Tooltip("If true, ignore trick inputs unless airborne.")]
     public bool onlyTrickWhileAirborne = true;
 
-    [Header("Flip Input")]
+    // ======= Inputs =======
+    [Header("Flip / Grab Inputs (no new keys)")]
     public KeyCode flipKey = KeyCode.J;
+    public KeyCode grabKey = KeyCode.K;
+    [Tooltip("Allow Arrow keys in addition to WASD for direction input.")]
     public bool useArrowsAlso = true;
 
-    [Header("Grab Input")]
-    public KeyCode grabKey = KeyCode.K;
+    // ======= Tricks =======
+    [Header("Flip Tricks (5 total; index 4 = no-direction flip)")]
+    public float[] flipDurations = new float[5] { 0.35f, 0.40f, 0.45f, 0.50f, 0.45f };
+    public int[] flipSpins = new int[5] { 1, 2, 2, 3, 2 };
+    public int[] flipPoints = new int[5] { 200, 300, 350, 500, 400 };
+    public string[] flipNames = new string[5] { "Kickflip", "Heelflip", "Varial", "360 Flip", "No-Dir Flip" };
 
-    [Header("Flip Tricks (4)")]
-    public float[] flipDurations = new float[4] { 0.35f, 0.4f, 0.45f, 0.5f };
-    public int[] flipSpins = new int[4] { 1, 2, 2, 3 };
-    public int[] flipPoints = new int[4] { 200, 300, 350, 500 };
-    public string[] flipNames = new string[4] { "Kickflip", "Heelflip", "Varial", "360 Flip" };
+    [Header("Grab Tricks (5 total; index 4 = no-direction grab)")]
+    public int[] grabPointsPerSecond = new int[5] { 120, 140, 160, 200, 220 };
+    public string[] grabNames = new string[5] { "Melon", "Indy", "Nosegrab", "Tailgrab", "No-Dir Grab" };
 
-    [Header("Grab Tricks (4)")]
-    public int[] grabPointsPerSecond = new int[4] { 120, 140, 160, 200 };
-    public string[] grabNames = new string[4] { "Melon", "Indy", "Nosegrab", "Tailgrab" };
+    [Header("Manager Bail Rules (used when manager decides landing)")]
+    [Tooltip("If airtime ends with an unfinished flip, count as bail.")]
+    public bool bailOnUnfinishedFlip = true;
+    [Tooltip("If still holding a grab when airtime ends, count as bail.")]
+    public bool bailOnGrabHeldAtLanding = true;
 
-    [Header("Safety / Landing")]
-    public bool bailOnUnfinishedFlip = true;       // used only when *we* decide landing internally
-    public bool bailOnGrabHeldAtLanding = true;    // used only when *we* decide landing internally
-
-    // runtime
+    // ======= Runtime state =======
     bool _airborne;
     float _airRemaining;
     float _airTotal;
 
     bool _flipActive;
-    int _flipIndex;
+    int _flipIndex;       // 0..4
     float _flipTime;
     float _flipDuration;
 
     bool _grabActive;
-    int _grabIndex;
+    int _grabIndex;       // 0..4
     float _grabHeldTime;
 
     int _points;
@@ -65,7 +77,7 @@ public class TrickManager : MonoBehaviour
             _airRemaining -= Time.fixedDeltaTime;
             if (_airRemaining <= 0f)
             {
-                // If airtime expires without the controller telling us, treat as a normal land.
+                // Airtime exhausted without controller signal → manager decides outcome.
                 NotifyLanded();
             }
         }
@@ -74,7 +86,10 @@ public class TrickManager : MonoBehaviour
         if (_grabActive) _grabHeldTime += Time.fixedDeltaTime;
     }
 
-    // ===== Airtime control =====
+    // ======================
+    // Airtime control
+    // ======================
+    /// <summary>Begin a new airtime window (ollie/ramp). Resets in-air trick states and kicks visuals.</summary>
     public void TriggerAirtime(float airSeconds)
     {
         airSeconds = Mathf.Max(airSeconds, 0.01f);
@@ -91,6 +106,7 @@ public class TrickManager : MonoBehaviour
         Debug.Log($"AIR START ({airSeconds:0.00}s)");
     }
 
+    /// <summary>Add airtime while airborne (ramps can extend).</summary>
     public void ExtendAirtime(float extraSeconds)
     {
         if (!_airborne) return;
@@ -101,85 +117,84 @@ public class TrickManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Internal convenience for when the manager itself decides landing (e.g., airtime exhausted).
-    /// Uses the manager’s own bail rules.
+    /// Manager-decided land (air ran out). Applies internal bail rules, then resolves via single path.
     /// </summary>
     public void NotifyLanded()
     {
         if (!_airborne) return;
-        bool bailed = false;
 
-        // Evaluate with *manager* rules
+        bool landed = true;
+        string reason = null;
+
         if (_flipActive && (_flipTime + 0.0001f < _flipDuration) && bailOnUnfinishedFlip)
-            bailed = true;
+        {
+            landed = false;
+            reason = "unfinished_flip";
+        }
         if (_grabActive && bailOnGrabHeldAtLanding)
-            bailed = true;
+        {
+            landed = false;
+            reason = string.IsNullOrEmpty(reason) ? "grab_held_at_landing" : (reason + "+grab_held");
+        }
 
-        FinishAirAndTricks(landed: !bailed, forceNoScore: bailed, fromController: false);
+        ResolveAirOutcome(landed, reason, fromController: false);
     }
 
-    // ===== New external hook the controller will call =====
     /// <summary>
-    /// Controller-owned landing decision. If landed==true → clean land (no manager-enforced bails).
-    /// If landed==false → bail (force). We still handle awarding flip/grab points appropriately.
+    /// Controller-decided air end. Authoritative boolean decides clean land vs bail.
     /// </summary>
     public void OnAirEnd(bool landed)
     {
         if (!_airborne) return;
-        // When the controller decides the outcome, we DO NOT apply manager bail rules.
-        FinishAirAndTricks(landed: landed, forceNoScore: !landed, fromController: true);
+        ResolveAirOutcome(landed, landed ? null : "controller_bail", fromController: true);
     }
 
     /// <summary>
-    /// Legacy overload kept for compatibility. Defaults to a clean land.
+    /// Force a bail from outside (e.g., leash yank). Unified path + events.
+    /// Works even if not airborne.
     /// </summary>
-    public void OnAirEnd() => OnAirEnd(true);
-
-    // ===== External hooks you already have =====
-    public void OnAirStart(float airSeconds) => TriggerAirtime(airSeconds);
-
-    /// <summary>Force a bail from outside (e.g., leash yank). Cancels tricks and ends airtime.</summary>
     public void OnBail(string reason = null)
     {
-        if (!_airborne)
+        if (_airborne)
         {
-            // Even if not airborne, clear visuals/tricks to be safe.
-            _flipActive = false; _flipTime = 0f; _flipDuration = 0f;
-            _grabActive = false; _grabHeldTime = 0f;
-            if (boardVisual) boardVisual.ResetGrabs();
-            Debug.Log(string.IsNullOrEmpty(reason) ? "BAIL" : $"BAIL: {reason}");
+            ResolveAirOutcome(false, string.IsNullOrEmpty(reason) ? "external_bail" : reason, fromController: true);
             return;
         }
-        FinishAirAndTricks(landed: false, forceNoScore: true, fromController: true);
-        Debug.Log(string.IsNullOrEmpty(reason) ? "BAIL" : $"BAIL: {reason}");
+
+        // Ground bail: still fire events and clear visuals/tricks.
+        ClearTrickStatesAndVisuals();
+        string r = string.IsNullOrEmpty(reason) ? "external_bail_ground" : reason;
+        Bail?.Invoke(r);
+        AirFinished?.Invoke(false, r);
+        Debug.Log($"BAIL (ground): {r}");
     }
 
-    // ===== Flip logic =====
+    // ======================
+    // Flip logic
+    // ======================
     void HandleFlipInput()
     {
         if (!Input.GetKeyDown(flipKey)) return;
         if (onlyTrickWhileAirborne && !_airborne) return;
 
-        int idx = ReadDirectionIndex(); // 0=Up,1=Right,2=Down,3=Left
-        _flipIndex = idx;
-        _flipDuration = SafeGet(flipDurations, idx, 0.4f);
+        int dirIdx = ReadDirectionIndexOrMinusOne();   // -1 if no direction held
+        _flipIndex = (dirIdx < 0) ? 4 : Mathf.Clamp(dirIdx, 0, 3);
 
-        if (_airRemaining < Mathf.Max(minAirtimeToTrick, _flipDuration * 0.85f))
-        {
-            Debug.Log($"Not enough air for {SafeGet(flipNames, idx, "Flip")}.");
-            return;
-        }
+        // Always allow starting a flip; if air ends before completion, NotifyLanded() will bail.
+        _flipDuration = SafeGet(flipDurations, _flipIndex, 0.4f);
 
         _flipActive = true;
         _flipTime = 0f;
 
-        int spins = SafeGet(flipSpins, idx, 1);
+        int spins = SafeGet(flipSpins, _flipIndex, 1);
         if (boardVisual) boardVisual.PlayFlip(_flipDuration, spins, _flipIndex);
 
-        Debug.Log($"FLIP START: {SafeGet(flipNames, idx, "Flip")}  ({_flipDuration:0.00}s, {spins} spins)");
+        Debug.Log($"FLIP START: {SafeGet(flipNames, _flipIndex, "Flip")}  ({_flipDuration:0.00}s, {spins} spins)");
     }
 
-    // ===== Grab logic =====
+    // ======================
+    // Grab logic
+    // ======================
     void HandleGrabInput()
     {
         if (Input.GetKeyDown(grabKey))
@@ -188,7 +203,9 @@ public class TrickManager : MonoBehaviour
             {
                 if (!_grabActive)
                 {
-                    _grabIndex = ReadDirectionIndex();
+                    int dirIdx = ReadDirectionIndexOrMinusOne();  // -1 if no direction
+                    _grabIndex = (dirIdx < 0) ? 4 : Mathf.Clamp(dirIdx, 0, 3);
+
                     _grabActive = true;
                     _grabHeldTime = 0f;
 
@@ -222,84 +239,104 @@ public class TrickManager : MonoBehaviour
         _grabHeldTime = 0f;
 
         if (boardVisual) boardVisual.EndGrab();
-
         if (!scored) Debug.Log("GRAB END (no score).");
     }
 
-    // ===== Outcome finisher (shared) =====
-    /// <param name="landed">Final outcome to present externally.</param>
-    /// <param name="forceNoScore">If true, cancel all scoring (used on bail).</param>
-    /// <param name="fromController">
-    /// If true, the controller decided outcome; ignore manager bail rules.
-    /// If false, we applied our internal rules already.
-    /// </param>
-    void FinishAirAndTricks(bool landed, bool forceNoScore, bool fromController)
+    // ======================
+    // Unified outcome resolver
+    // ======================
+    void ResolveAirOutcome(bool landed, string reason, bool fromController)
     {
-        // Flip outcome
+        // Flip resolution
         if (_flipActive)
         {
-            if (!forceNoScore && landed && (_flipTime + 0.0001f >= _flipDuration))
+            bool finished = (_flipTime + 0.0001f >= _flipDuration);
+            if (landed && finished)
             {
                 int pts = SafeGet(flipPoints, _flipIndex, 200);
                 _points += pts;
                 Debug.Log($"+{pts}  FLIP LANDED: {SafeGet(flipNames, _flipIndex, "Flip")}   (Total: {_points})");
             }
-            else if (!landed && !fromController)
+            else if (!landed)
             {
-                // Only log manager-driven unfinished bail detail; controller-owned bail already knows why.
-                Debug.Log($"BAIL! Unfinished flip: {SafeGet(flipNames, _flipIndex, "Flip")}  time={_flipTime:0.00}/{_flipDuration:0.00}");
+                string why = string.IsNullOrEmpty(reason) ? "bail" : reason;
+                if (!fromController && !finished) why = "unfinished_flip";
+                Debug.Log($"BAIL! {why}");
             }
-            else if (landed && (_flipTime + 0.0001f < _flipDuration))
+            else if (landed && !finished)
             {
-                // Landed clean per controller, but flip unfinished → no score, no bail.
                 Debug.Log($"NO SCORE (unfinished flip): {SafeGet(flipNames, _flipIndex, "Flip")}");
             }
         }
 
-        // Grab outcome
+        // Grab resolution
         if (_grabActive)
         {
-            if (!forceNoScore && landed)
+            if (!landed)
             {
-                // If the player released before landing, ReleaseGrab would have scored already.
-                // If still holding at land and controller says 'landed', we end grab with no extra penalty.
+                Debug.Log($"GRAB END (bail): {SafeGet(grabNames, _grabIndex, "Grab")}");
+            }
+            else
+            {
                 Debug.Log($"GRAB END at landing: {SafeGet(grabNames, _grabIndex, "Grab")} (no extra score)");
             }
         }
 
-        // Reset trick states
-        _flipActive = false; _flipTime = 0f; _flipDuration = 0f;
-        _grabActive = false; _grabHeldTime = 0f;
-
-        // End airtime
+        // End airtime + clear trick states + visuals
         _airborne = false;
         _airRemaining = 0f;
-
-        // Clear sustained visuals
+        _flipActive = false; _flipTime = 0f; _flipDuration = 0f;
+        _grabActive = false; _grabHeldTime = 0f;
         if (boardVisual) boardVisual.ResetGrabs();
 
-        Debug.Log(landed ? "CLEAN LAND." : "BAIL.");
+        // Fire external events so PlayerController can do bail sprite + LooseBoard, or reset on land
+        if (!landed)
+        {
+            string r = string.IsNullOrEmpty(reason) ? "bail" : reason;
+            Bail?.Invoke(r);
+            AirFinished?.Invoke(false, r);
+            Debug.Log("CLEANUP: BAIL.");
+        }
+        else
+        {
+            AirFinished?.Invoke(true, null);
+            Debug.Log("CLEAN LAND.");
+        }
     }
 
-    // ===== Helpers =====
-    int ReadDirectionIndex()
+    void ClearTrickStatesAndVisuals()
+    {
+        _flipActive = false; _flipTime = 0f; _flipDuration = 0f;
+        _grabActive = false; _grabHeldTime = 0f;
+        if (boardVisual) boardVisual.ResetGrabs();
+    }
+
+    // ======================
+    // Helpers
+    // ======================
+    int ReadDirectionIndexOrMinusOne()
     {
         bool up = Input.GetKey(KeyCode.W) || (useArrowsAlso && Input.GetKey(KeyCode.UpArrow));
         bool right = Input.GetKey(KeyCode.D) || (useArrowsAlso && Input.GetKey(KeyCode.RightArrow));
         bool down = Input.GetKey(KeyCode.S) || (useArrowsAlso && Input.GetKey(KeyCode.DownArrow));
         bool left = Input.GetKey(KeyCode.A) || (useArrowsAlso && Input.GetKey(KeyCode.LeftArrow));
 
+        int dirCount = (up ? 1 : 0) + (right ? 1 : 0) + (down ? 1 : 0) + (left ? 1 : 0);
+        if (dirCount == 0) return -1; // no direction pressed
+
+        // Single-direction presses
         if (up && !right && !left) return 0;
         if (right && !up && !down) return 1;
         if (down && !right && !left) return 2;
         if (left && !up && !down) return 3;
 
+        // Diagonals: clockwise priority Up→Right→Down→Left
         if (up && right) return 1;
         if (right && down) return 2;
         if (down && left) return 3;
         if (left && up) return 0;
 
-        return 0;
+        return -1;
     }
 
     static T SafeGet<T>(T[] arr, int idx, T fallback)
@@ -308,7 +345,7 @@ public class TrickManager : MonoBehaviour
         return arr[idx];
     }
 
-    // ===== Grind passthroughs (compat) =====
+    // Grind passthroughs (compat)
     public void StartGrind() { if (boardVisual) boardVisual.StartGrind(); }
     public void StopGrind() { if (boardVisual) boardVisual.StopGrind(); }
 }

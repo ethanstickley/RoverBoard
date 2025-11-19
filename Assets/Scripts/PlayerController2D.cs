@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿// PlayerController2D.cs — updated to call TrickManager.TriggerAirtime(...) instead of OnAirStart(...)
+using UnityEngine;
 
 [RequireComponent(typeof(Rigidbody2D))]
 public class PlayerController2D : MonoBehaviour
@@ -57,7 +58,26 @@ public class PlayerController2D : MonoBehaviour
         if (!playerSR) playerSR = GetComponentInChildren<SpriteRenderer>();
         trickMgr = FindObjectOfType<TrickManager>();
         ApplyBoardVisual();
-        ForceRefreshBodySprite(); // show correct initial frame
+        ForceRefreshBodySprite();
+    }
+
+    void OnEnable()
+    {
+        if (!trickMgr) trickMgr = FindObjectOfType<TrickManager>();
+        if (trickMgr != null)
+        {
+            trickMgr.Bail += OnTM_Bail;
+            trickMgr.AirFinished += OnTM_AirFinished;
+        }
+    }
+
+    void OnDisable()
+    {
+        if (trickMgr != null)
+        {
+            trickMgr.Bail -= OnTM_Bail;
+            trickMgr.AirFinished -= OnTM_AirFinished;
+        }
     }
 
     void Update()
@@ -77,7 +97,7 @@ public class PlayerController2D : MonoBehaviour
         if (IsAirborne)
         {
             airTime -= Time.deltaTime;
-            if (airTime <= 0f) EndAir(landed: true);
+            if (airTime <= 0f) EndAir(landed: true); // TrickManager will bail if unfinished flip/grab rules apply
         }
 
         UpdateBodyAnim(Time.deltaTime);
@@ -102,7 +122,7 @@ public class PlayerController2D : MonoBehaviour
         }
         moveDir = moveDir.sqrMagnitude > 1e-4f ? moveDir.normalized : Vector2.zero;
 
-        // <-- expose world-intent for DogAI anticipation (0 when no input)
+        // expose world-intent for DogAI
         lastMoveInputWorld = moveDir;
 
         float targetSpeed = IsOnBoard ? moveSpeedOnBoard : moveSpeedOnFoot;
@@ -125,36 +145,64 @@ public class PlayerController2D : MonoBehaviour
     {
         IsAirborne = true;
         airTime = Mathf.Max(airTime, 0f) + Mathf.Max(0.05f, timeAdd);
-        trickMgr?.OnAirStart(airTime);
+        trickMgr?.TriggerAirtime(airTime);  // UPDATED: canonical call
         Debug.Log($"AIR: start (window={airTime:0.00}s)");
     }
 
     public void EndAir(bool landed)
     {
         if (!IsAirborne) return;
-        trickMgr?.OnAirEnd(landed);
+        trickMgr?.OnAirEnd(landed); // TM resolves, then events come back to us
         IsAirborne = false;
         airTime = 0f;
         Debug.Log("AIR: end");
     }
 
-    // ---- Bail with LooseBoard spawn ----
+    // ---- External trigger to initiate a bail (e.g., leash yank) ----
     public void Bail()
+    {
+        if (trickMgr != null)
+        {
+            trickMgr.OnBail("player_forced");
+            return;
+        }
+        DoBailVisualsAndLooseBoard("player_forced");
+    }
+
+    // ---- TrickManager event handlers ----
+    void OnTM_Bail(string reason)
+    {
+        DoBailVisualsAndLooseBoard(reason);
+    }
+
+    void OnTM_AirFinished(bool landed, string reason)
+    {
+        if (landed)
+        {
+            if (_isBailed) { _isBailed = false; }
+            ForceRefreshBodySprite();
+            ApplyBoardVisual();
+        }
+        else
+        {
+            if (!_isBailed) DoBailVisualsAndLooseBoard(string.IsNullOrEmpty(reason) ? "air_bail" : reason);
+        }
+    }
+
+    // ---- Visual helpers ----
+    void DoBailVisualsAndLooseBoard(string reason)
     {
         if (_isBailed) return;
 
-        // capture current velocity for loose board
         Vector2 preBailVel = rb.linearVelocity;
 
         IsOnBoard = false;
-        ApplyBoardVisual();             // hides boardVisual when off-board
+        ApplyBoardVisual();
         rb.linearVelocity = Vector2.zero;
 
-        // show bail sprite + freeze input while bailed
         _isBailed = true;
         if (playerSR && bailSprite) playerSR.sprite = bailSprite;
 
-        // spawn loose board that keeps sliding then despawns
         if (looseBoardPrefab)
         {
             var go = Instantiate(looseBoardPrefab, boardVisual ? boardVisual.position : transform.position, Quaternion.identity);
@@ -167,10 +215,7 @@ public class PlayerController2D : MonoBehaviour
             lb.lifetime = looseBoardLifetime;
         }
 
-        Debug.Log("Player BAILED (LooseBoard spawned)");
-        trickMgr?.OnBail();
-
-        // Optional: auto-stand-up after a short delay
+        Debug.Log($"Player BAILED ({reason}) (LooseBoard spawned)");
         StartCoroutine(StandUpAfter(1.0f));
     }
 
@@ -178,11 +223,10 @@ public class PlayerController2D : MonoBehaviour
     {
         yield return new WaitForSeconds(seconds);
         _isBailed = false;
-        // remain off-board; player can remount later with E
         ForceRefreshBodySprite();
+        ApplyBoardVisual();
     }
 
-    // ---- Visual helpers ----
     void ApplyBoardVisual()
     {
         if (boardVisual) boardVisual.gameObject.SetActive(IsOnBoard && !_isBailed);
@@ -192,7 +236,6 @@ public class PlayerController2D : MonoBehaviour
     {
         if (!playerSR || _isBailed) return;
 
-        // simple 2-frame ping-pong while moving; hold the first frame when idle
         bool moving = rb.linearVelocity.sqrMagnitude > 0.05f * 0.05f;
         if (!moving)
         {
