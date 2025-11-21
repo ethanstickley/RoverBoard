@@ -1075,8 +1075,8 @@ MonoBehaviour:
   - {fileID: -4665693784434910678, guid: 4eac425a5727cf94e862d643e738754d, type: 3}
   - {fileID: 5668705541084313971, guid: 67856ac16141e6b449fdb6ee637a559a, type: 3}
   flipUseSheet: 0101010101
-  flipSheetCycles: 0500000005000000050000000500000005000000
-  flipHalfTurns: 0100000002000000020000000300000002000000
+  flipSheetCycles: 0100000001000000010000000100000000000000
+  flipHalfTurns: 0000000000000000010000000100000001000000
   flipAxis: {x: 0, y: 0, z: 1}
   grabSprites:
   - {fileID: 0}
@@ -1113,8 +1113,8 @@ Camera:
   m_GameObject: {fileID: 550345768}
   m_Enabled: 1
   serializedVersion: 2
-  m_ClearFlags: 1
-  m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
+  m_ClearFlags: 2
+  m_BackGroundColor: {r: 0, g: 1, b: 0.3764706, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -2437,7 +2437,7 @@ MonoBehaviour:
   accel: 30
   dragPerSec: 0.12
   faceMoveDirection: 1
-  IsOnBoard: 1
+  IsOnBoard: 0
   ollieKey: 32
   baseAirTime: 0.5
   airTime: 0
@@ -2452,6 +2452,7 @@ MonoBehaviour:
   animFrameTime: 0.15
   looseBoardPrefab: {fileID: 2761617595945332967, guid: d8fc2a9d9ed994b4eab372d6b9ad6ac5, type: 3}
   looseBoardLifetime: 2
+  bailLockSeconds: 5
   lastMoveInputWorld: {x: 0, y: 0}
 --- !u!50 &1702188062
 Rigidbody2D:

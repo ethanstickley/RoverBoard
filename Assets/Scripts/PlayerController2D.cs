@@ -1,4 +1,7 @@
-﻿// PlayerController2D.cs — updated to call TrickManager.TriggerAirtime(...) instead of OnAirStart(...)
+﻿// PlayerController2D.cs — adds a stronger _isBailed guard in UpdateBodyAnim()
+// Ensures bailSprite is actively re-applied every frame while bailed.
+// Keeps freeze-during-bail, loose board spawn, and event-driven integration with TrickManager.
+
 using UnityEngine;
 
 [RequireComponent(typeof(Rigidbody2D))]
@@ -22,8 +25,8 @@ public class PlayerController2D : MonoBehaviour
 
     [Header("Air / Ollie")]
     public KeyCode ollieKey = KeyCode.Space;
-    public float baseAirTime = 1.1f;      // flat ollie air
-    public float airTime;                  // active air time remaining
+    public float baseAirTime = 1.1f;  // flat ollie air
+    public float airTime;              // active air time remaining
     public bool IsAirborne { get; private set; }
 
     [Header("Toggle Board")]
@@ -39,6 +42,10 @@ public class PlayerController2D : MonoBehaviour
     public GameObject looseBoardPrefab;    // prefab with Rigidbody2D + LooseBoard.cs
     public float looseBoardLifetime = 2.0f;
 
+    [Header("Bail Settings")]
+    [Tooltip("How long the player stays down (no input, no movement) after a bail.")]
+    public float bailLockSeconds = 1.0f;
+
     // Exposed so DogAI can anticipate based on camera-relative input intent
     [HideInInspector] public Vector2 lastMoveInputWorld;
 
@@ -48,6 +55,10 @@ public class PlayerController2D : MonoBehaviour
     float _animTimer;
     int _animIndex;        // 0 or 1
     bool _isBailed;        // show bailSprite while true
+
+    // freeze handling
+    RigidbodyConstraints2D _preBailConstraints;
+    bool _frozenByBail;
 
     void Reset() { rb = GetComponent<Rigidbody2D>(); }
 
@@ -82,14 +93,15 @@ public class PlayerController2D : MonoBehaviour
 
     void Update()
     {
-        if (Input.GetKeyDown(toggleBoardKey) && !_isBailed)
+        // No toggles or ollies while bailed
+        if (!_isBailed && Input.GetKeyDown(toggleBoardKey))
         {
             IsOnBoard = !IsOnBoard;
             ApplyBoardVisual();
             Debug.Log($"Player: {(IsOnBoard ? "On-board" : "On-foot")}");
         }
 
-        if (IsOnBoard && Input.GetKeyDown(ollieKey) && !IsAirborne && !_isBailed)
+        if (!_isBailed && IsOnBoard && Input.GetKeyDown(ollieKey) && !IsAirborne)
         {
             StartAir(baseAirTime);
         }
@@ -97,7 +109,7 @@ public class PlayerController2D : MonoBehaviour
         if (IsAirborne)
         {
             airTime -= Time.deltaTime;
-            if (airTime <= 0f) EndAir(landed: true); // TrickManager will bail if unfinished flip/grab rules apply
+            if (airTime <= 0f) EndAir(landed: true); // TrickManager decides bail/land outcome
         }
 
         UpdateBodyAnim(Time.deltaTime);
@@ -105,7 +117,8 @@ public class PlayerController2D : MonoBehaviour
 
     void FixedUpdate()
     {
-        if (_isBailed) return; // frozen while bailed
+        // Hard stop if bailed. Constraints are frozen, but keep this early-out too.
+        if (_isBailed) return;
 
         rb.linearVelocity *= Mathf.Clamp01(1f - dragPerSec * Time.fixedDeltaTime);
 
@@ -145,7 +158,7 @@ public class PlayerController2D : MonoBehaviour
     {
         IsAirborne = true;
         airTime = Mathf.Max(airTime, 0f) + Mathf.Max(0.05f, timeAdd);
-        trickMgr?.TriggerAirtime(airTime);  // UPDATED: canonical call
+        trickMgr?.TriggerAirtime(airTime);  // canonical call
         Debug.Log($"AIR: start (window={airTime:0.00}s)");
     }
 
@@ -158,18 +171,7 @@ public class PlayerController2D : MonoBehaviour
         Debug.Log("AIR: end");
     }
 
-    // ---- External trigger to initiate a bail (e.g., leash yank) ----
-    public void Bail()
-    {
-        if (trickMgr != null)
-        {
-            trickMgr.OnBail("player_forced");
-            return;
-        }
-        DoBailVisualsAndLooseBoard("player_forced");
-    }
-
-    // ---- TrickManager event handlers ----
+    // ---- Event handlers from TrickManager ----
     void OnTM_Bail(string reason)
     {
         DoBailVisualsAndLooseBoard(reason);
@@ -189,23 +191,34 @@ public class PlayerController2D : MonoBehaviour
         }
     }
 
-    // ---- Visual helpers ----
+    // ---- Bail visuals (event-driven)
     void DoBailVisualsAndLooseBoard(string reason)
     {
         if (_isBailed) return;
 
+        // Cache pre-bail velocity for the loose board
         Vector2 preBailVel = rb.linearVelocity;
 
+        // Hide board & stop our motion
         IsOnBoard = false;
         ApplyBoardVisual();
         rb.linearVelocity = Vector2.zero;
+        rb.angularVelocity = 0f;
 
+        // Freeze physics so the dog/leash can't tow us
+        _preBailConstraints = rb.constraints;
+        rb.constraints = RigidbodyConstraints2D.FreezeAll;
+        _frozenByBail = true;
+
+        // Lockout + sprite
         _isBailed = true;
         if (playerSR && bailSprite) playerSR.sprite = bailSprite;
 
+        // Spawn loose board moving away with pre-bail velocity
         if (looseBoardPrefab)
         {
-            var go = Instantiate(looseBoardPrefab, boardVisual ? boardVisual.position : transform.position, Quaternion.identity);
+            var spawnPos = boardVisual ? boardVisual.position : transform.position;
+            var go = Instantiate(looseBoardPrefab, spawnPos, Quaternion.identity);
             var lbrb = go.GetComponent<Rigidbody2D>();
             if (!lbrb) lbrb = go.AddComponent<Rigidbody2D>();
             lbrb.gravityScale = 0f;
@@ -216,12 +229,20 @@ public class PlayerController2D : MonoBehaviour
         }
 
         Debug.Log($"Player BAILED ({reason}) (LooseBoard spawned)");
-        StartCoroutine(StandUpAfter(1.0f));
+        StartCoroutine(StandUpAfter(bailLockSeconds));
     }
 
     System.Collections.IEnumerator StandUpAfter(float seconds)
     {
         yield return new WaitForSeconds(seconds);
+
+        // Unfreeze physics
+        if (_frozenByBail)
+        {
+            rb.constraints = _preBailConstraints;
+            _frozenByBail = false;
+        }
+
         _isBailed = false;
         ForceRefreshBodySprite();
         ApplyBoardVisual();
@@ -234,7 +255,15 @@ public class PlayerController2D : MonoBehaviour
 
     void UpdateBodyAnim(float dt)
     {
-        if (!playerSR || _isBailed) return;
+        if (!playerSR) return;
+
+        // STRONG GUARD: while bailed, keep re-applying the bail sprite and exit immediately.
+        if (_isBailed)
+        {
+            if (bailSprite && playerSR.sprite != bailSprite)
+                playerSR.sprite = bailSprite;
+            return;
+        }
 
         bool moving = rb.linearVelocity.sqrMagnitude > 0.05f * 0.05f;
         if (!moving)

@@ -1,4 +1,4 @@
-// TrickManager.cs — HUD-integrated version
+// TrickManager.cs — bail when !landed OR (landed && unfinished flip) OR (landed && grab held if rule on)
 using System;
 using UnityEngine;
 
@@ -20,7 +20,7 @@ public class TrickManager : MonoBehaviour
     public bool onlyTrickWhileAirborne = true;
 
     // ======= Inputs =======
-    [Header("Flip / Grab Inputs (no new keys)")]
+    [Header("Flip / Grab Inputs")]
     public KeyCode flipKey = KeyCode.J;
     public KeyCode grabKey = KeyCode.K;
     [Tooltip("Allow Arrow keys in addition to WASD for direction input.")]
@@ -37,7 +37,7 @@ public class TrickManager : MonoBehaviour
     public int[] grabPointsPerSecond = new int[5] { 120, 140, 160, 200, 220 };
     public string[] grabNames = new string[5] { "Melon", "Indy", "Nosegrab", "Tailgrab", "No-Dir Grab" };
 
-    [Header("Manager Bail Rules (used when manager decides landing)")]
+    [Header("Manager Bail Rules")]
     [Tooltip("If airtime ends with an unfinished flip, count as bail.")]
     public bool bailOnUnfinishedFlip = true;
     [Tooltip("If still holding a grab when airtime ends, count as bail.")]
@@ -59,15 +59,12 @@ public class TrickManager : MonoBehaviour
 
     int _points;
 
-    // Optional global access for pickups that don't have a reference handy
     public static TrickManager Instance { get; private set; }
 
     void Awake()
     {
         if (Instance == null) Instance = this;
-        // Initialize HUD with current counters
-        HUDController.Instance?.SetPoints(_points);
-        // Treats: let game code drive it; default shown as 0 by HUD
+        HUDController.Instance?.SetPoints(_points); // init HUD
     }
 
     void OnDestroy()
@@ -89,10 +86,7 @@ public class TrickManager : MonoBehaviour
         if (_airborne)
         {
             _airRemaining -= Time.fixedDeltaTime;
-            if (_airRemaining <= 0f)
-            {
-                NotifyLanded();
-            }
+            if (_airRemaining <= 0f) NotifyLanded();
         }
 
         if (_flipActive) _flipTime += Time.fixedDeltaTime;
@@ -187,8 +181,7 @@ public class TrickManager : MonoBehaviour
 
         int spins = SafeGet(flipSpins, _flipIndex, 1);
         if (boardVisual) boardVisual.PlayFlip(_flipDuration, spins, _flipIndex);
-
-        
+        Debug.Log($"FLIP START: {SafeGet(flipNames, _flipIndex, "Flip")} ({_flipDuration:0.00}s, spins={spins})");
     }
 
     // ======================
@@ -230,7 +223,7 @@ public class TrickManager : MonoBehaviour
             int pps = SafeGet(grabPointsPerSecond, _grabIndex, 120);
             int add = Mathf.RoundToInt(pps * _grabHeldTime);
             _points += add;
-            HUDController.Instance?.AddPoints(add); // <-- HUD update
+            HUDController.Instance?.AddPoints(add); // HUD update
             Debug.Log($"+{add}  GRAB LANDED: {SafeGet(grabNames, _grabIndex, "Grab")}  ({_grabHeldTime:0.00}s)   (Total: {_points})");
             scored = true;
         }
@@ -247,53 +240,67 @@ public class TrickManager : MonoBehaviour
     // ======================
     void ResolveAirOutcome(bool landed, string reason, bool fromController)
     {
-        // Flip resolution
+        // Was the flip finished?
+        bool finishedFlip = _flipActive && (_flipTime + 0.0001f >= _flipDuration);
+
+        // Bail conditions:
+        // 1) !landed
+        // 2) landed && unfinished flip (if rule enabled)
+        // 3) landed && grab held (if rule enabled)
+        bool bailByUnfinishedFlip = landed && _flipActive && !finishedFlip && bailOnUnfinishedFlip;
+        bool bailByGrabHeld = landed && _grabActive && bailOnGrabHeldAtLanding;
+        bool shouldBail = !landed || bailByUnfinishedFlip || bailByGrabHeld;
+
+        // Flip scoring / messages
         if (_flipActive)
         {
-            bool finished = (_flipTime + 0.0001f >= _flipDuration);
-            if (landed && finished)
+            if (!shouldBail && landed && finishedFlip)
             {
                 int pts = SafeGet(flipPoints, _flipIndex, 200);
                 _points += pts;
-                HUDController.Instance?.AddPoints(pts); // <-- HUD update
+                HUDController.Instance?.AddPoints(pts); // HUD update
                 Debug.Log($"+{pts}  FLIP LANDED: {SafeGet(flipNames, _flipIndex, "Flip")}   (Total: {_points})");
             }
-            else if (!landed)
+            else if (shouldBail && bailByUnfinishedFlip && !fromController)
             {
-                string why = string.IsNullOrEmpty(reason) ? "bail" : reason;
-                if (!fromController && !finished) why = "unfinished_flip";
-                Debug.Log($"BAIL! {why}");
-            }
-            else if (landed && !finished)
-            {
-                Debug.Log($"NO SCORE (unfinished flip): {SafeGet(flipNames, _flipIndex, "Flip")}");
+                reason = string.IsNullOrEmpty(reason) ? "unfinished_flip" : reason;
+                Debug.Log("BAIL! unfinished_flip");
             }
         }
 
-        // Grab resolution at landing
+        // Grab message at landing
         if (_grabActive)
         {
-            if (!landed)
+            if (shouldBail && bailByGrabHeld)
             {
+                reason = string.IsNullOrEmpty(reason) ? "grab_held_at_landing" : reason;
                 Debug.Log($"GRAB END (bail): {SafeGet(grabNames, _grabIndex, "Grab")}");
             }
-            else
+            else if (!shouldBail && landed)
             {
                 Debug.Log($"GRAB END at landing: {SafeGet(grabNames, _grabIndex, "Grab")} (no extra score)");
             }
         }
 
-        // End airtime + clear trick states + visuals
+        // End air + clear trick states + visuals
         _airborne = false;
         _airRemaining = 0f;
         _flipActive = false; _flipTime = 0f; _flipDuration = 0f;
         _grabActive = false; _grabHeldTime = 0f;
         if (boardVisual) boardVisual.ResetGrabs();
 
-        // Fire external events so PlayerController can do bail sprite + LooseBoard, or reset on land
-        if (!landed)
+        // Events
+        if (shouldBail)
         {
-            string r = string.IsNullOrEmpty(reason) ? "bail" : reason;
+            string r = reason;
+            if (string.IsNullOrEmpty(r))
+            {
+                if (!landed) r = "bail";
+                else if (bailByUnfinishedFlip) r = "unfinished_flip";
+                else if (bailByGrabHeld) r = "grab_held_at_landing";
+                else r = "bail";
+            }
+
             Bail?.Invoke(r);
             AirFinished?.Invoke(false, r);
             Debug.Log("CLEANUP: BAIL.");
@@ -315,7 +322,6 @@ public class TrickManager : MonoBehaviour
     // ======================
     // Treats API (simple HUD hook)
     // ======================
-    /// <summary>Add to the treats counter shown on the HUD (call from Treat pickup / DogAI).</summary>
     public void AddTreat(int delta = 1)
     {
         HUDController.Instance?.AddTreat(delta);
@@ -353,7 +359,6 @@ public class TrickManager : MonoBehaviour
         return arr[idx];
     }
 
-    // Grind passthroughs (compat)
     public void StartGrind() { if (boardVisual) boardVisual.StartGrind(); }
     public void StopGrind() { if (boardVisual) boardVisual.StopGrind(); }
 }
