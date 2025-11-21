@@ -1,7 +1,5 @@
-// HUDController.cs (TMP version)
-// Minimal, extensible HUD with two TMP text fields (points & treats)
-// and a sprite-based health display (9 frames).
-// Drop this on a Canvas GameObject. Assign references in the Inspector.
+// HUDController.cs (TMP version) — updated to increment health index on bail.
+// Subscribes to TrickManager.Bail and advances the health sprite by 1 each bail.
 
 using UnityEngine;
 using UnityEngine.UI;   // for Image
@@ -31,7 +29,7 @@ public class HUDController : MonoBehaviour
     [Tooltip("Prefix for the treats readout.")]
     public string treatsLabel = "Treats: ";
 
-    // Cached values (optional; useful if you later animate changes)
+    // Cached values
     int _points;
     int _treats;
     int _healthIndex;
@@ -48,64 +46,86 @@ public class HUDController : MonoBehaviour
         }
         Instance = this;
 
-        // Initialize the UI to whatever defaults are currently cached
+        // Initialize UI from cached defaults
         ApplyPointsText(_points);
         ApplyTreatsText(_treats);
         ApplyHealthSprite(_healthIndex);
     }
 
-    // -------------------------
-    // Public API (simple & explicit)
-    // -------------------------
+    void OnEnable()
+    {
+        // Auto-subscribe to TrickManager bail events to advance health
+        var tm = FindObjectOfType<TrickManager>();
+        if (tm != null)
+        {
+            tm.Bail += OnBailFromTrickManager;
+        }
+    }
 
-    /// <summary>Set the player's accumulated points. Updates the points text immediately.</summary>
+    void OnDisable()
+    {
+        var tm = FindObjectOfType<TrickManager>();
+        if (tm != null)
+        {
+            tm.Bail -= OnBailFromTrickManager;
+        }
+        if (Instance == this) Instance = null;
+    }
+
+    // -------------------------
+    // Public API (Points)
+    // -------------------------
     public void SetPoints(int points)
     {
         _points = Mathf.Max(0, points);
         ApplyPointsText(_points);
     }
 
-    /// <summary>Add delta to the current points and update the HUD.</summary>
     public void AddPoints(int delta)
     {
         SetPoints(_points + delta);
     }
 
-    /// <summary>Set the number of treats eaten by the dog. Updates the treats text immediately.</summary>
+    // -------------------------
+    // Public API (Treats)
+    // -------------------------
     public void SetTreats(int treats)
     {
         _treats = Mathf.Max(0, treats);
         ApplyTreatsText(_treats);
     }
 
-    /// <summary>Add delta to the current treats count and update the HUD.</summary>
     public void AddTreat(int delta = 1)
     {
         SetTreats(_treats + delta);
     }
 
-    /// <summary>
-    /// Set health sprite by explicit index 0..8 (clamped). Index 0 = lowest/no health, 8 = full health.
-    /// </summary>
+    // -------------------------
+    // Public API (Health)
+    // -------------------------
+    /// <summary>Set health sprite by explicit index 0..8 (clamped). Index 0 = lowest/no health, 8 = full health.</summary>
     public void SetHealthIndex(int index0to8)
     {
         _healthIndex = Mathf.Clamp(index0to8, 0, 8);
         ApplyHealthSprite(_healthIndex);
     }
 
-    /// <summary>
-    /// Convenience: set health by fraction [0..1] (auto-maps to 0..8).
-    /// </summary>
+    /// <summary>Convenience: set health by fraction [0..1] (auto-maps to 0..8).</summary>
     public void SetHealthFraction(float fraction01)
     {
         int idx = Mathf.RoundToInt(Mathf.Clamp01(fraction01) * 8f);
         SetHealthIndex(idx);
     }
 
+    /// <summary>Increment health index by step (positive step moves toward 'worse' if you map that way).</summary>
+    public void IncrementHealth(int step = 1)
+    {
+        SetHealthIndex(_healthIndex + Mathf.Max(1, step));
+    }
+
     // -------------------------
     // Internal helpers
     // -------------------------
-
     void ApplyPointsText(int val)
     {
         if (pointsText)
@@ -135,5 +155,15 @@ public class HUDController : MonoBehaviour
 
         // If no sprite available, hide the image to avoid confusion.
         healthImage.enabled = false;
+    }
+
+    // -------------------------
+    // Event hook
+    // -------------------------
+    void OnBailFromTrickManager(string reason)
+    {
+        IncrementHealth(1);
+        // Optional debug:
+        // Debug.Log($"HUD: Bail detected ({reason}). Health index -> {_healthIndex}");
     }
 }

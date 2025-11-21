@@ -2058,7 +2058,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1496961586}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fd1fcefda6799dd4187605a7f87e9959, type: 3}
   m_Name: 
@@ -2114,11 +2114,11 @@ MonoBehaviour:
   grabKey: 107
   useArrowsAlso: 1
   flipDurations:
-  - 0.35
-  - 0.35
+  - 0.1
+  - 0.15
+  - 0.2
+  - 0.25
   - 0.3
-  - 0.45
-  - 0.45
   flipSpins: 0100000002000000020000000300000001000000
   flipPoints: c80000002c0100005e010000f4010000f4010000
   flipNames:
@@ -2452,7 +2452,7 @@ MonoBehaviour:
   animFrameTime: 0.15
   looseBoardPrefab: {fileID: 2761617595945332967, guid: d8fc2a9d9ed994b4eab372d6b9ad6ac5, type: 3}
   looseBoardLifetime: 2
-  bailLockSeconds: 5
+  bailLockSeconds: 2
   lastMoveInputWorld: {x: 0, y: 0}
 --- !u!50 &1702188062
 Rigidbody2D:
