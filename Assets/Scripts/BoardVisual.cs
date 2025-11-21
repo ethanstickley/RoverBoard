@@ -1,11 +1,11 @@
-﻿using System.Collections;
+﻿// BoardVisual.cs — stays active; exposes SetVisible(bool) to show/hide only the SpriteRenderer.
+// Also includes the hardened coroutine guards + half-turn spins + shared flip sheet logic.
+using System.Collections;
 using UnityEngine;
 
 [DisallowMultipleComponent]
 public class BoardVisual : MonoBehaviour
 {
-    public enum FlipStyle { RotateOnly, RotateAndSwapSprite }
-
     [Header("References")]
     [Tooltip("SpriteRenderer that shows the board.")]
     public SpriteRenderer boardSR;
@@ -20,18 +20,25 @@ public class BoardVisual : MonoBehaviour
     [Tooltip("Shape of the rise/fall (0..1 time → 0..1 height).")]
     public AnimationCurve ollieCurve = AnimationCurve.EaseInOut(0, 0, 1, 0);
 
-    [Header("Flip Tricks (per trick index 0..3)")]
-    [Tooltip("Flip behavior per trick (RotateOnly or RotateAndSwapSprite).")]
-    public FlipStyle[] flipStyles = new FlipStyle[4] { FlipStyle.RotateOnly, FlipStyle.RotateOnly, FlipStyle.RotateOnly, FlipStyle.RotateOnly };
-    [Tooltip("Optional alternate sprites for RotateAndSwapSprite flips.")]
-    public Sprite[] flipSprites = new Sprite[4];
+    [Header("Flip Tricks (shared sprite sheet + per-trick rules)")]
+    [Tooltip("Shared sprite sheet used for ALL flip tricks. A 'flip' is one full cycle through these frames.")]
+    public Sprite[] flipSheetFrames;
 
-    [Tooltip("Axis to rotate around for flips (use Z for top-down 2D).")]
+    [Tooltip("Per-trick: whether to animate the sprite sheet while flipping (one or more full cycles). Length should match your flip trick count (e.g., 5).")]
+    public bool[] flipUseSheet = new bool[5] { true, true, true, true, true };
+
+    [Tooltip("Per-trick: how many full sheet cycles ('flips') to complete during the flip duration. Length should match your flip trick count.")]
+    public int[] flipSheetCycles = new int[5] { 1, 1, 1, 1, 1 };
+
+    [Tooltip("Per-trick: number of 180° half-turns to rotate the BoardVisual during the flip. E.g., 2 = 360°, 3 = 540°. Length should match your flip trick count.")]
+    public int[] flipHalfTurns = new int[5] { 2, 2, 2, 3, 2 };
+
+    [Tooltip("Axis to rotate around for spins (use Z for top-down 2D).")]
     public Vector3 flipAxis = new Vector3(0, 0, 1);
 
-    [Header("Grab Tricks (per trick index 0..3)")]
-    [Tooltip("Sprites to display while each grab is held.")]
-    public Sprite[] grabSprites = new Sprite[4];
+    [Header("Grab Tricks (per-trick static sprites)")]
+    [Tooltip("Sprites to display while each grab is held. Length should match your grab trick count (e.g., 5).")]
+    public Sprite[] grabSprites = new Sprite[5];
 
     [Header("Grind")]
     [Tooltip("Optional sprite to display while grinding.")]
@@ -47,18 +54,45 @@ public class BoardVisual : MonoBehaviour
 
     bool _activeFlip;
     int _activeFlipIndex = -1;
+
     bool _activeGrab;
     int _activeGrabIndex = -1;
+
     bool _activeGrind;
 
     void Awake()
     {
         if (!boardSR) boardSR = GetComponent<SpriteRenderer>();
-        if (!boardSR) Debug.LogWarning("[BoardVisual] Missing SpriteRenderer reference.");
         _baseLocalPos = transform.localPosition;
         _baseLocalRot = transform.localRotation;
         if (boardSR) _cachedSprite = boardSR.sprite;
         if (!defaultBoardSprite && boardSR) defaultBoardSprite = boardSR.sprite;
+    }
+
+    void OnDisable()
+    {
+        // Stop any running anims when this component is disabled
+        SafeStop(ref _ollieCo);
+        SafeStop(ref _flipCo);
+
+        if (this != null)
+        {
+            transform.localPosition = _baseLocalPos;
+            transform.localRotation = Quaternion.identity;
+        }
+    }
+
+    void OnDestroy()
+    {
+        SafeStop(ref _ollieCo);
+        SafeStop(ref _flipCo);
+    }
+
+    // ======== Visibility (Option 1) ========
+    public void SetVisible(bool visible)
+    {
+        if (boardSR) boardSR.enabled = visible;
+        // Do NOT disable this GameObject. We keep this component active at all times.
     }
 
     // =======================
@@ -66,10 +100,10 @@ public class BoardVisual : MonoBehaviour
     // =======================
     public void PlayOllie(float airSeconds)
     {
+        if (!isActiveAndEnabled || this == null) return;
         if (airSeconds <= 0.03f) airSeconds = 0.3f;
-        if (_ollieCo != null) StopCoroutine(_ollieCo);
-        // capture base each ollie to avoid snapping to an old position
-        _baseLocalPos = transform.localPosition;
+        SafeStop(ref _ollieCo);
+        _baseLocalPos = transform.localPosition; // capture base each ollie
         _ollieCo = StartCoroutine(OllieRiseRoutine(airSeconds));
     }
 
@@ -78,13 +112,17 @@ public class BoardVisual : MonoBehaviour
         float t = 0f;
         while (t < dur)
         {
+            if (!IsUsable()) yield break;
+
             float n = Mathf.Clamp01(t / Mathf.Max(0.0001f, dur));
             float y = ollieCurve.Evaluate(n) * ollieRise;
             transform.localPosition = _baseLocalPos + new Vector3(0f, y, 0f);
+
             t += Time.deltaTime;
             yield return null;
         }
-        transform.localPosition = _baseLocalPos;
+
+        if (IsUsable()) transform.localPosition = _baseLocalPos;
         _ollieCo = null;
     }
 
@@ -92,63 +130,92 @@ public class BoardVisual : MonoBehaviour
     // Public API (Flips)
     // =======================
     /// <summary>
-    /// Rotate the board to complete 'spins' full rotations in 'duration' seconds.
-    /// Call with the trick index (0..3) so the component can optionally swap sprites depending on the trick.
+    /// Play a flip trick.
+    /// NOTE: spins parameter kept for backward-compat; total rotation prefers per-trick flipHalfTurns (180° units).
+    /// If flipHalfTurns lacks an entry, we fall back to spins (full 360° rotations).
     /// </summary>
-    public void PlayFlip(float duration, int spins, int trickIndex)
+    public void PlayFlip(float duration, int spins /* legacy full-rotations */, int trickIndex)
     {
+        if (!isActiveAndEnabled || this == null) return;
+
         _activeFlip = true;
-        _activeFlipIndex = Mathf.Clamp(trickIndex, 0, 3);
+        _activeFlipIndex = Mathf.Clamp(trickIndex, 0, Mathf.Max(0, (flipUseSheet != null ? flipUseSheet.Length : 0) - 1));
 
-        // sprite choice for flip (if configured)
-        UpdateSpriteVisual(priority: "flip_start");
-
-        if (_flipCo != null) StopCoroutine(_flipCo);
-        _flipCo = StartCoroutine(FlipRoutine(duration, Mathf.Max(1, spins)));
+        SafeStop(ref _flipCo);
+        _flipCo = StartCoroutine(FlipRoutine(duration, spins, _activeFlipIndex));
     }
 
-    IEnumerator FlipRoutine(float dur, int spins)
+    IEnumerator FlipRoutine(float dur, int legacySpins, int trickIdx)
     {
         float t = 0f;
-        float totalDeg = 360f * spins;
 
-        // start from a neutral rotation (respect any grab/grind/static usage by composing at the end)
+        // Total rotation degrees (prefer half-turns)
+        int halfTurns = SafeGet(flipHalfTurns, trickIdx, -1);
+        float totalDeg = (halfTurns >= 0) ? 180f * halfTurns : 360f * Mathf.Max(1, legacySpins);
+
+        // Sheet usage
+        bool useSheet = SafeGet(flipUseSheet, trickIdx, false);
+        int cycles = Mathf.Max(0, SafeGet(flipSheetCycles, trickIdx, 0));
+        int frameCount = (flipSheetFrames != null) ? flipSheetFrames.Length : 0;
+
         _baseLocalRot = Quaternion.identity;
 
         while (t < dur)
         {
+            if (!IsUsable()) yield break;
+
             float n = Mathf.Clamp01(t / Mathf.Max(0.0001f, dur));
+
+            // SPIN (full GO rotation)
             float angle = totalDeg * n;
             Quaternion spin = Quaternion.AngleAxis(angle, flipAxis.normalized);
             transform.localRotation = _baseLocalRot * spin;
+
+            // FLIP (sheet animation cycles)
+            if (useSheet && frameCount > 0 && cycles > 0)
+            {
+                float framesF = n * (cycles * frameCount);
+                int frameIndex = Mathf.FloorToInt(framesF) % frameCount;
+                if (boardSR && frameIndex >= 0 && frameIndex < frameCount)
+                {
+                    var sprite = flipSheetFrames[frameIndex];
+                    if (sprite) boardSR.sprite = sprite;
+                }
+            }
+            else
+            {
+                UpdateSpriteVisual(priority: "flip_tick_no_sheet");
+            }
+
             t += Time.deltaTime;
             yield return null;
         }
 
-        // End aligned (no spin)
-        transform.localRotation = Quaternion.identity;
-        _flipCo = null;
+        if (IsUsable())
+        {
+            transform.localRotation = Quaternion.identity;
+            _activeFlip = false;
+            _activeFlipIndex = -1;
+            UpdateSpriteVisual(priority: "flip_end");
+        }
 
-        // end of flip
-        _activeFlip = false;
-        _activeFlipIndex = -1;
-        UpdateSpriteVisual(priority: "flip_end");
+        _flipCo = null;
     }
 
     // =======================
     // Public API (Grabs)
     // =======================
-    /// <summary>Enter a grab (no rotation). Supply the grab trick index 0..3.</summary>
     public void BeginGrab(int grabIndex)
     {
+        if (!isActiveAndEnabled || this == null) return;
         _activeGrab = true;
-        _activeGrabIndex = Mathf.Clamp(grabIndex, 0, 3);
+        _activeGrabIndex = Mathf.Clamp(grabIndex, 0, Mathf.Max(0, grabSprites.Length - 1));
         UpdateSpriteVisual(priority: "grab_begin");
     }
 
-    /// <summary>Exit a grab (restore previous sprite if appropriate).</summary>
     public void EndGrab()
     {
+        if (!isActiveAndEnabled || this == null) return;
         _activeGrab = false;
         _activeGrabIndex = -1;
         UpdateSpriteVisual(priority: "grab_end");
@@ -159,33 +226,26 @@ public class BoardVisual : MonoBehaviour
     // =======================
     public void StartGrind()
     {
+        if (!isActiveAndEnabled || this == null) return;
         _activeGrind = true;
         UpdateSpriteVisual(priority: "grind_begin");
     }
 
     public void StopGrind()
     {
+        if (!isActiveAndEnabled || this == null) return;
         _activeGrind = false;
         UpdateSpriteVisual(priority: "grind_end");
     }
 
     // =======================
-    // Legacy back-compat (optional)
-    // If older code calls tilt-based grab methods, keep them compiling
-    // but route to non-rotational grab visuals.
+    // Legacy helpers
     // =======================
-    public void BeginGrabTilt(float degrees)
-    {
-        // No rotation for grabs now; treat as a generic grab using index 0 if caller doesn't pass one.
-        BeginGrab(0);
-    }
-    public void EndGrabTilt()
-    {
-        EndGrab();
-    }
+    public void BeginGrabTilt(float degrees) { BeginGrab(0); }
+    public void EndGrabTilt() { EndGrab(); }
     public void ResetGrabs()
     {
-        // End any grab and restore visuals.
+        if (!isActiveAndEnabled || this == null) return;
         _activeGrab = false; _activeGrabIndex = -1;
         UpdateSpriteVisual(priority: "reset_grabs");
     }
@@ -195,36 +255,55 @@ public class BoardVisual : MonoBehaviour
     // =======================
     void UpdateSpriteVisual(string priority)
     {
-        if (!boardSR) return;
+        if (!IsUsable()) return;
 
-        // Choose which sprite should be visible based on current states.
-        // Priority: Flip (if set to swap) > Grab > Grind > Default
+        // If a flip is actively sheet-animating, that coroutine writes frames directly.
+        // Otherwise resolve: Grab > Grind > Default.
 
-        // 1) Flip
-        if (_activeFlip && _activeFlipIndex >= 0 && _activeFlipIndex < flipStyles.Length)
-        {
-            if (flipStyles[_activeFlipIndex] == FlipStyle.RotateAndSwapSprite)
-            {
-                var fs = (flipSprites != null && _activeFlipIndex < flipSprites.Length) ? flipSprites[_activeFlipIndex] : null;
-                if (fs) { boardSR.sprite = fs; return; }
-            }
-        }
-
-        // 2) Grab
+        // 1) Grab
         if (_activeGrab && _activeGrabIndex >= 0 && grabSprites != null && _activeGrabIndex < grabSprites.Length)
         {
             var gs = grabSprites[_activeGrabIndex];
-            if (gs) { boardSR.sprite = gs; return; }
+            if (gs && boardSR) { boardSR.sprite = gs; return; }
         }
 
-        // 3) Grind
-        if (_activeGrind && grindSprite)
+        // 2) Grind
+        if (_activeGrind && grindSprite && boardSR)
         {
             boardSR.sprite = grindSprite; return;
         }
 
-        // 4) Default
-        if (defaultBoardSprite) boardSR.sprite = defaultBoardSprite;
-        else if (_cachedSprite) boardSR.sprite = _cachedSprite;
+        // 3) Default
+        if (boardSR)
+        {
+            if (defaultBoardSprite) boardSR.sprite = defaultBoardSprite;
+            else if (_cachedSprite) boardSR.sprite = _cachedSprite;
+        }
+    }
+
+    // =======================
+    // Helpers
+    // =======================
+    static T SafeGet<T>(T[] arr, int idx, T fallback)
+    {
+        if (arr == null || idx < 0 || idx >= arr.Length) return fallback;
+        return arr[idx];
+    }
+
+    void SafeStop(ref Coroutine co)
+    {
+        if (co != null)
+        {
+            try { StopCoroutine(co); }
+            catch { }
+            co = null;
+        }
+    }
+
+    bool IsUsable()
+    {
+        if (this == null) return false;
+        if (!isActiveAndEnabled) return false;
+        return true;
     }
 }

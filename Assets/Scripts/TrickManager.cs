@@ -1,14 +1,12 @@
-// TrickManager.cs — single canonical airtime entry: TriggerAirtime(float)
+// TrickManager.cs — HUD-integrated version
 using System;
 using UnityEngine;
 
 [DisallowMultipleComponent]
 public class TrickManager : MonoBehaviour
 {
-    // ======= External integration points =======
-    /// <summary>Fired whenever airtime resolves (land or bail). (landed, reason)</summary>
+    // ======= External events =======
     public event Action<bool, string> AirFinished;
-    /// <summary>Fired on every bail (air or ground).</summary>
     public event Action<string> Bail;
 
     // ======= References =======
@@ -61,6 +59,22 @@ public class TrickManager : MonoBehaviour
 
     int _points;
 
+    // Optional global access for pickups that don't have a reference handy
+    public static TrickManager Instance { get; private set; }
+
+    void Awake()
+    {
+        if (Instance == null) Instance = this;
+        // Initialize HUD with current counters
+        HUDController.Instance?.SetPoints(_points);
+        // Treats: let game code drive it; default shown as 0 by HUD
+    }
+
+    void OnDestroy()
+    {
+        if (Instance == this) Instance = null;
+    }
+
     void Update()
     {
         if (!onlyTrickWhileAirborne || _airborne)
@@ -77,7 +91,6 @@ public class TrickManager : MonoBehaviour
             _airRemaining -= Time.fixedDeltaTime;
             if (_airRemaining <= 0f)
             {
-                // Airtime exhausted without controller signal → manager decides outcome.
                 NotifyLanded();
             }
         }
@@ -89,7 +102,6 @@ public class TrickManager : MonoBehaviour
     // ======================
     // Airtime control
     // ======================
-    /// <summary>Begin a new airtime window (ollie/ramp). Resets in-air trick states and kicks visuals.</summary>
     public void TriggerAirtime(float airSeconds)
     {
         airSeconds = Mathf.Max(airSeconds, 0.01f);
@@ -106,7 +118,6 @@ public class TrickManager : MonoBehaviour
         Debug.Log($"AIR START ({airSeconds:0.00}s)");
     }
 
-    /// <summary>Add airtime while airborne (ramps can extend).</summary>
     public void ExtendAirtime(float extraSeconds)
     {
         if (!_airborne) return;
@@ -116,9 +127,6 @@ public class TrickManager : MonoBehaviour
         Debug.Log($"AIR EXTEND (+{add:0.00}s) → remaining {_airRemaining:0.00}s");
     }
 
-    /// <summary>
-    /// Manager-decided land (air ran out). Applies internal bail rules, then resolves via single path.
-    /// </summary>
     public void NotifyLanded()
     {
         if (!_airborne) return;
@@ -140,19 +148,12 @@ public class TrickManager : MonoBehaviour
         ResolveAirOutcome(landed, reason, fromController: false);
     }
 
-    /// <summary>
-    /// Controller-decided air end. Authoritative boolean decides clean land vs bail.
-    /// </summary>
     public void OnAirEnd(bool landed)
     {
         if (!_airborne) return;
         ResolveAirOutcome(landed, landed ? null : "controller_bail", fromController: true);
     }
 
-    /// <summary>
-    /// Force a bail from outside (e.g., leash yank). Unified path + events.
-    /// Works even if not airborne.
-    /// </summary>
     public void OnBail(string reason = null)
     {
         if (_airborne)
@@ -161,7 +162,6 @@ public class TrickManager : MonoBehaviour
             return;
         }
 
-        // Ground bail: still fire events and clear visuals/tricks.
         ClearTrickStatesAndVisuals();
         string r = string.IsNullOrEmpty(reason) ? "external_bail_ground" : reason;
         Bail?.Invoke(r);
@@ -180,7 +180,6 @@ public class TrickManager : MonoBehaviour
         int dirIdx = ReadDirectionIndexOrMinusOne();   // -1 if no direction held
         _flipIndex = (dirIdx < 0) ? 4 : Mathf.Clamp(dirIdx, 0, 3);
 
-        // Always allow starting a flip; if air ends before completion, NotifyLanded() will bail.
         _flipDuration = SafeGet(flipDurations, _flipIndex, 0.4f);
 
         _flipActive = true;
@@ -189,7 +188,7 @@ public class TrickManager : MonoBehaviour
         int spins = SafeGet(flipSpins, _flipIndex, 1);
         if (boardVisual) boardVisual.PlayFlip(_flipDuration, spins, _flipIndex);
 
-        Debug.Log($"FLIP START: {SafeGet(flipNames, _flipIndex, "Flip")}  ({_flipDuration:0.00}s, {spins} spins)");
+        
     }
 
     // ======================
@@ -231,6 +230,7 @@ public class TrickManager : MonoBehaviour
             int pps = SafeGet(grabPointsPerSecond, _grabIndex, 120);
             int add = Mathf.RoundToInt(pps * _grabHeldTime);
             _points += add;
+            HUDController.Instance?.AddPoints(add); // <-- HUD update
             Debug.Log($"+{add}  GRAB LANDED: {SafeGet(grabNames, _grabIndex, "Grab")}  ({_grabHeldTime:0.00}s)   (Total: {_points})");
             scored = true;
         }
@@ -255,6 +255,7 @@ public class TrickManager : MonoBehaviour
             {
                 int pts = SafeGet(flipPoints, _flipIndex, 200);
                 _points += pts;
+                HUDController.Instance?.AddPoints(pts); // <-- HUD update
                 Debug.Log($"+{pts}  FLIP LANDED: {SafeGet(flipNames, _flipIndex, "Flip")}   (Total: {_points})");
             }
             else if (!landed)
@@ -269,7 +270,7 @@ public class TrickManager : MonoBehaviour
             }
         }
 
-        // Grab resolution
+        // Grab resolution at landing
         if (_grabActive)
         {
             if (!landed)
@@ -312,6 +313,15 @@ public class TrickManager : MonoBehaviour
     }
 
     // ======================
+    // Treats API (simple HUD hook)
+    // ======================
+    /// <summary>Add to the treats counter shown on the HUD (call from Treat pickup / DogAI).</summary>
+    public void AddTreat(int delta = 1)
+    {
+        HUDController.Instance?.AddTreat(delta);
+    }
+
+    // ======================
     // Helpers
     // ======================
     int ReadDirectionIndexOrMinusOne()
@@ -322,15 +332,13 @@ public class TrickManager : MonoBehaviour
         bool left = Input.GetKey(KeyCode.A) || (useArrowsAlso && Input.GetKey(KeyCode.LeftArrow));
 
         int dirCount = (up ? 1 : 0) + (right ? 1 : 0) + (down ? 1 : 0) + (left ? 1 : 0);
-        if (dirCount == 0) return -1; // no direction pressed
+        if (dirCount == 0) return -1;
 
-        // Single-direction presses
         if (up && !right && !left) return 0;
         if (right && !up && !down) return 1;
         if (down && !right && !left) return 2;
         if (left && !up && !down) return 3;
 
-        // Diagonals: clockwise priority Up→Right→Down→Left
         if (up && right) return 1;
         if (right && down) return 2;
         if (down && left) return 3;

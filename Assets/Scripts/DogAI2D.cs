@@ -70,7 +70,7 @@ public class DogAI2D : MonoBehaviour
     [Tooltip("How fast bladder drains per second while peeing at a hydrant.")]
     public float peeDrainPerSecond = 2.5f;
 
-    // Pee visuals (optional; keep your existing assignments)
+    // Pee visuals (optional)
     [Header("Pee Visuals")]
     public GameObject peePrefab;
     public int peeDropsPerBurst = 5;
@@ -92,7 +92,7 @@ public class DogAI2D : MonoBehaviour
     float _poopTimer;
     Sprite _defaultSprite;
 
-    // Facing + flip controls (2.2)
+    // Facing + flip controls
     public enum FlipAxis { X, Y }
 
     [Header("Facing / Flip")]
@@ -222,7 +222,7 @@ public class DogAI2D : MonoBehaviour
             }
         }
 
-        // Good vs Bad behavior (unchanged)
+        // Good vs Bad behavior
         if (goodBad01 >= 0.65f)
         {
             if (IsPlayerMoving())
@@ -348,6 +348,13 @@ public class DogAI2D : MonoBehaviour
     public float AddGoodDogEnergy(float delta)
     {
         goodBad01 = Mathf.Clamp01(goodBad01 + delta);
+
+        // When treats call this with a positive delta, also bump the HUD treats count via TrickManager.
+        if (delta > 0f)
+        {
+            TrickManager.Instance?.AddTreat(1);
+        }
+
         Debug.Log($"Dog mood: {goodBad01:0.00}");
         return goodBad01;
     }

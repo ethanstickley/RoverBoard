@@ -125,8 +125,8 @@ public class PoopStreaksEmitter : MonoBehaviour
             transform.position = target.position;
             transform.rotation = target.rotation;
 
-            Vector3 right = target.right;
-            Vector3 forward = target.up;
+            Vector3 right = target.up;
+            Vector3 forward = target.right;
             Vector3 back = -forward * backwardOffset;
 
             Vector3 leftPos = target.position - right * offsetX + back;

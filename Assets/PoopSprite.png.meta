@@ -134,7 +134,8 @@ TextureImporter:
     secondaryTextures: []
     spriteCustomMetadata:
       entries: []
-    nameFileIdTable: {}
+    nameFileIdTable:
+      PoopSprite_0: 6377467072079132814
   mipmapLimitGroupName: 
   pSDRemoveMatte: 0
   userData: 

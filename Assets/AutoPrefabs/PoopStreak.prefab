@@ -45,11 +45,14 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   target: {fileID: 0}
-  emitDuration: 2
-  trailTime: 10
-  width: 0.08
+  emitDuration: 50
+  trailTime: 50
+  width: 0.1
   offsetX: 0.25
   backwardOffset: 0
   brownColor: {r: 0.35, g: 0.2, b: 0.05, a: 1}
-  alphaRange: {x: 1, y: 0}
+  alphaRange: {x: 0, y: 1}
   trailMaterial: {fileID: 10754, guid: 0000000000000000f000000000000000, type: 0}
+  nonCollidingLayerName: Decals
+  applyLayerOnAwake: 1
+  strip2DPhysicsOnAwake: 1
